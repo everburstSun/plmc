@@ -5,7 +5,9 @@
 #include <sys/time.h>
 #include <assert.h>
 #include <string.h>
-
+#include <iostream>
+// #include <cuda_runtime.h>
+#include <unistd.h>
 /* Optionally include OpenMP with the -fopenmp flag */
 #if defined(_OPENMP)
     #include <omp.h>
@@ -13,6 +15,7 @@
 
 #include "include/lbfgs.h"
 #include "include/twister.h"
+// #include "include/culbfgsb.h"
 
 #include "include/plm.h"
 #include "include/inference.h"
@@ -137,6 +140,8 @@ numeric_t *InferPairModel(alignment_t *ali, options_t *options) {
     return (numeric_t *) x;
 }
 
+
+
 void EstimatePairModelMAP(numeric_t *x, numeric_t *lambdas, alignment_t *ali,
     options_t *options) {
     /* Computes Maximum a posteriori (MAP) estimates for the parameters of 
@@ -150,8 +155,25 @@ void EstimatePairModelMAP(numeric_t *x, numeric_t *lambdas, alignment_t *ali,
     lbfgs_parameter_init(&param);
     param.epsilon = 1E-3;
     param.max_iterations = options->maxIter; /* 0 is unbounded */
+    /* Problem instance in void array */
+    void *d[3] = {(void *)ali, (void *)options, (void *)lambdas};
 
     /* Estimate parameters by optimization */
+    // cudaSetDevice(1);
+    LBFGSB_CUDA_STATE<numeric_t> state;
+    memset(&state, 0, sizeof(state));
+    LBFGSB_CUDA_SUMMARY<numeric_t> summary;
+    cublasStatus_t stat = cublasCreate(&(state.m_cublas_handle));
+    state.m_funcgrad_callback = [&d, &ali](numeric_t *x, numeric_t &f, numeric_t *g, 
+                                const cudaStream_t& stream,
+                                const LBFGSB_CUDA_SUMMARY<numeric_t>& summary) {
+        // if (summary.num_iteration % 100 == 0) 
+        printf("CUDA iteration %d F: %f\n", summary.num_iteration, f);
+        f = PLMNegLogPosteriorGapReduce((void*)d, x, g, ali->nParams, summary.num_iteration);
+
+        return 0;
+    };
+    state.m_customized_stopping_callback = NULL;
     static lbfgs_evaluate_t algo;
     switch(options->estimatorMAP) {
         case INFER_MAP_PLM:
@@ -173,8 +195,6 @@ void EstimatePairModelMAP(numeric_t *x, numeric_t *lambdas, alignment_t *ali,
     if (options->zeroAPC == 1) fprintf(stderr,
             "Estimating coupling hyperparameters le = 1/2 inverse variance\n");
 
-    /* Problem instance in void array */
-    void *d[3] = {(void *)ali, (void *)options, (void *)lambdas};
 
     if (options->sgd == 1) {
         /* Scale hyperparams for minibatch */
@@ -199,11 +219,38 @@ void EstimatePairModelMAP(numeric_t *x, numeric_t *lambdas, alignment_t *ali,
                 lambdaEij(i, j) *= invScale;
     } else {
         /* L-BFGS optimization */
-        int ret = 0;
-        lbfgsfloatval_t fx;
-        ret = lbfgs(ali->nParams, x, &fx, algo, ReportProgresslBFGS,
-            (void*)d, &param);
-        fprintf(stderr, "Gradient optimization: %s\n", LBFGSErrorString(ret));
+        LBFGSB_CUDA_OPTION<numeric_t> lbfgsb_options;
+        lbfgsbcuda::lbfgsbdefaultoption<numeric_t>(lbfgsb_options);
+        lbfgsb_options.mode = LCM_CUDA;
+        lbfgsb_options.eps_f = static_cast<numeric_t>(1e-5);
+        lbfgsb_options.eps_g = static_cast<numeric_t>(1e-5);
+        lbfgsb_options.eps_x = static_cast<numeric_t>(1e-5);
+        lbfgsb_options.max_iteration = options->maxIter;
+        int *nbd;
+        numeric_t *l;
+        numeric_t *u;
+        numeric_t *x_dev;
+        cudaMalloc((void**)&nbd, ali->nParams * sizeof(int));
+        cudaMalloc((void**)&l, ali->nParams * sizeof(numeric_t));
+        cudaMalloc((void**)&u, ali->nParams * sizeof(numeric_t));
+        cudaMalloc((void**)&x_dev, ali->nParams * sizeof(numeric_t));
+        cudaMemset(nbd, 0, ali->nParams * sizeof(int));
+        cudaMemset(l, 0, ali->nParams * sizeof(numeric_t));
+        cudaMemset(u, 0, ali->nParams * sizeof(numeric_t));
+        cudaMemcpy(x_dev, x, ali->nParams * sizeof(numeric_t), cudaMemcpyHostToDevice);
+        lbfgsbcuda::lbfgsbminimize<numeric_t>(ali->nParams, state, lbfgsb_options,
+                                    x_dev, nbd, l, u, summary);
+        // int ret = 0;
+        // lbfgsfloatval_t fx;
+        // ret = lbfgs(ali->nParams, x, &fx, algo, ReportProgresslBFGS,
+        //     (void*)d, &param);
+        // fprintf(stderr, "Gradient optimization: %s\n", LBFGSErrorString(ret));
+        cudaMemcpy(x, x_dev, ali->nParams * sizeof(numeric_t), cudaMemcpyDeviceToHost);
+        cudaFree(nbd);
+        cudaFree(l);
+        cudaFree(u);
+        cudaFree(x_dev);
+        std::cout << "STOPPING CRITERIA: " << summary.info << std::endl;
     }
 
     /* Optionally re-estimate parameters with adjusted hyperparameters */
@@ -524,7 +571,12 @@ static lbfgsfloatval_t PLMNegLogPosteriorGapReduce(void *instance,
 
     /* Initialize log-likelihood and gradient */
     lbfgsfloatval_t fx = 0.0;
-    for (int i = 0; i < ali->nParams; i++) g[i] = 0;
+    lbfgsfloatval_t* x_host = new lbfgsfloatval_t[n];
+    cudaMemcpy(x_host, x, n * sizeof(lbfgsfloatval_t), cudaMemcpyDeviceToHost);
+
+    lbfgsfloatval_t* g_host = new lbfgsfloatval_t[n];
+    cudaMemcpy(g_host, g, n * sizeof(lbfgsfloatval_t), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < ali->nParams; i++) g_host[i] = 0;
 
     /* Negative log-pseudolikelihood */
     #pragma omp parallel for
@@ -539,12 +591,12 @@ static lbfgsfloatval_t PLMNegLogPosteriorGapReduce(void *instance,
         for (int j = 0; j < i; j++)
             for (int a = 0; a < ali->nCodes; a++)
                 for (int b = 0; b < ali->nCodes; b++)
-                    siteE(j, a, b) = xEij(i, j, a, b);
+                    siteE(j, a, b) = xEij_host(i, j, a, b);
         for (int j = i + 1; j < ali->nSites; j++)
             for (int a = 0; a < ali->nCodes; a++)
                 for (int b = 0; b < ali->nCodes; b++)
-                    siteE(j, a, b) = xEij(i, j, a, b);
-        for (int a = 0; a < ali->nCodes; a++) siteH(i, a) = xHi(i, a);
+                    siteE(j, a, b) = xEij_host(i, j, a, b);
+        for (int a = 0; a < ali->nCodes; a++) siteH(i, a) = xHi_host(i, a);
 
         numeric_t *Di = (numeric_t *) malloc(ali->nCodes * ali->nCodes
         * ali->nSites * sizeof(numeric_t));
@@ -612,12 +664,12 @@ static lbfgsfloatval_t PLMNegLogPosteriorGapReduce(void *instance,
         for (int j = 0; j < i; j++)
             for (int a = 0; a < ali->nCodes; a++)
                 for (int b = 0; b < ali->nCodes; b++)
-                    dEij(i, j, a, b) += siteDE(j, a, b);
+                    dEij_host(i, j, a, b) += siteDE(j, a, b);
         for (int j = i + 1; j < ali->nSites; j++)
             for (int a = 0; a < ali->nCodes; a++)
                 for (int b = 0; b < ali->nCodes; b++)
-                    dEij(i, j, a, b) += siteDE(j, a, b);
-        for (int a = 0; a < ali->nCodes; a++) dHi(i, a) += siteDH(i, a);
+                    dEij_host(i, j, a, b) += siteDE(j, a, b);
+        for (int a = 0; a < ali->nCodes; a++) dHi_host(i, a) += siteDH(i, a);
         free(Xi);
         free(Di);
         }
@@ -631,21 +683,25 @@ static lbfgsfloatval_t PLMNegLogPosteriorGapReduce(void *instance,
     /* Gaussian priors */
     for (int i = 0; i < ali->nSites; i++)
         for (int ai = 0; ai < ali->nCodes; ai++) {
-            dHi(i, ai) += lambdaHi(i) * 2.0 * xHi(i, ai);
-            fx += lambdaHi(i) * xHi(i, ai) * xHi(i, ai);
+            dHi_host(i, ai) += lambdaHi(i) * 2.0 * xHi_host(i, ai);
+            fx += lambdaHi(i) * xHi_host(i, ai) * xHi_host(i, ai);
         }
 
     for (int i = 0; i < ali->nSites-1; i++)
         for (int j = i + 1; j < ali->nSites; j++)
             for (int ai = 0; ai < ali->nCodes; ai++)
                 for (int aj = 0; aj < ali->nCodes; aj++) {
-                    dEij(i, j, ai, aj) += lambdaEij(i, j)
-                        * 2.0 * xEij(i, j, ai, aj);
+                    dEij_host(i, j, ai, aj) += lambdaEij(i, j)
+                        * 2.0 * xEij_host(i, j, ai, aj);
                     fx += lambdaEij(i, j)
-                        * xEij(i, j, ai, aj) * xEij(i, j, ai, aj);
+                        * xEij_host(i, j, ai, aj) * xEij_host(i, j, ai, aj);
                 }
 
-    fx = PostCondition(x, g, fx, ali, options);
+    fx = PostCondition(x_host, g_host, fx, ali, options);
+    cudaMemcpy(g, g_host, n * sizeof(lbfgsfloatval_t), cudaMemcpyHostToDevice);
+    // cudaMemcpy(x, x_host, n * sizeof(lbfgsfloatval_t), cudaMemcpyHostToDevice);
+    delete[] g_host;
+    delete[] x_host;
     return fx;
 }
 

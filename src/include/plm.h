@@ -153,6 +153,10 @@ void OutputCouplingScores(char *couplingsFile, const numeric_t *x,
 #define xEij(i, j, Ai, Aj)     x[ali->nSites * ali->nCodes + (i < j ? (((j) * (j - 1)/2 + i) * ali->nCodes * ali->nCodes + (Aj) * ali->nCodes + Ai) : (((i)*(i - 1)/2 + j) * ali->nCodes * ali->nCodes + (Ai) * ali->nCodes + Aj))]
 #define dHi(i, Ai)             g[i + ali->nSites * (Ai)]
 #define dEij(i, j, Ai, Aj)     g[ali->nSites * ali->nCodes + (i < j ? (((j) * (j - 1)/2 + i) * ali->nCodes * ali->nCodes + (Aj) * ali->nCodes + Ai) : (((i)*(i - 1)/2 + j) * ali->nCodes * ali->nCodes + (Ai) * ali->nCodes + Aj))]
+#define xHi_host(i, Ai)             x_host[i + ali->nSites * (Ai)]
+#define xEij_host(i, j, Ai, Aj)     x_host[ali->nSites * ali->nCodes + (i < j ? (((j) * (j - 1)/2 + i) * ali->nCodes * ali->nCodes + (Aj) * ali->nCodes + Ai) : (((i)*(i - 1)/2 + j) * ali->nCodes * ali->nCodes + (Ai) * ali->nCodes + Aj))]
+#define dHi_host(i, Ai)             g_host[i + ali->nSites * (Ai)]
+#define dEij_host(i, j, Ai, Aj)     g_host[ali->nSites * ali->nCodes + (i < j ? (((j) * (j - 1)/2 + i) * ali->nCodes * ali->nCodes + (Aj) * ali->nCodes + Ai) : (((i)*(i - 1)/2 + j) * ali->nCodes * ali->nCodes + (Ai) * ali->nCodes + Aj))]
 
 #define wHi(w, i, Ai)           w[i + ali->nSites * (Ai)]
 #define wEij(w, i, j, Ai, Aj)   w[ali->nSites * ali->nCodes + (i < j ? (((j) * (j - 1)/2 + i) * ali->nCodes * ali->nCodes + (Aj) * ali->nCodes + Ai) : (((i)*(i - 1)/2 + j) * ali->nCodes * ali->nCodes + (Ai) * ali->nCodes + Aj))]

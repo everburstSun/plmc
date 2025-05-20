@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
+#include <iostream>
 
 #include "include/twister.h"
 #include "include/plm.h"
@@ -66,36 +68,90 @@ options_t* default_options() {
 void run_plmc(char *alignFile, char* outputFile, char *couplingsFile,
     char *weightsFile, char *weightsOutputFile, options_t *options) {
 
+    FILE *time_log = fopen("plmc_time_log.txt", "w");
+    if (time_log == NULL) {
+        fprintf(stderr, "Error opening time log file\n");
+        exit(1);
+    }
+
+    clock_t start, end;
+    double cpu_time_used;
+
     /* Initialize PRNG */
+    start = clock();
     init_genrand(42);
+    end = clock();
+    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+    fprintf(time_log, "init_genrand: %f seconds\n", cpu_time_used);
 
     /* Read multiple sequence alignment */
+    start = clock();
     alignment_t *ali = MSARead(alignFile, options);
+    end = clock();
+    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+    fprintf(time_log, "MSARead: %f seconds\n", cpu_time_used);
 
     if (weightsFile != NULL) {
+        start = clock();
         ReadCustomWeightsFile(weightsFile, ali);
+        end = clock();
+        cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+        fprintf(time_log, "ReadCustomWeightsFile: %f seconds\n", cpu_time_used);
     } else {
         /* Reweight sequences by inverse neighborhood density */
+        start = clock();
         MSAReweightSequences(ali, options);
+        std::cout << "nEff: " << ali->nEff << std::endl;
+        end = clock();
+        cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+        fprintf(time_log, "MSAReweightSequences: %f seconds\n", cpu_time_used);
     }
     if (weightsOutputFile != NULL) {
+        start = clock();
         WriteWeightsFile(weightsOutputFile, ali);
+        end = clock();
+        cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+        fprintf(time_log, "WriteWeightsFile: %f seconds\n", cpu_time_used);
     }
 
     /* Compute sitewise and pairwise marginal distributions */
+    start = clock();
     MSACountMarginals(ali, options);
+    end = clock();
+    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+    fprintf(time_log, "MSACountMarginals: %f seconds\n", cpu_time_used);
 
     /* Infer model parameters */
+    start = clock();
     numeric_t *x = InferPairModel(ali, options);
+    end = clock();
+    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+    fprintf(time_log, "InferPairModel: %f seconds\n", cpu_time_used);
 
     /* (Optionally) Output estimated parameters and coupling scores */
-    if (outputFile != NULL)
+    if (outputFile != NULL) {
+        start = clock();
         OutputParametersFull(outputFile, x, ali, options);
-    if (couplingsFile != NULL)
+        end = clock();
+        cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+        fprintf(time_log, "OutputParametersFull: %f seconds\n", cpu_time_used);
+    }
+    if (couplingsFile != NULL) {
+        start = clock();
         OutputCouplingScores(couplingsFile, x, ali, options);
+        end = clock();
+        cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+        fprintf(time_log, "OutputCouplingScores: %f seconds\n", cpu_time_used);
+    }
 
     /* Free alignment and options */
+    start = clock();
     MSAFree(ali, options);
+    end = clock();
+    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+    fprintf(time_log, "MSAFree: %f seconds\n", cpu_time_used);
+
+    fclose(time_log);
 }
 
 alignment_t *MSARead(char *alignFile, options_t *options) {
